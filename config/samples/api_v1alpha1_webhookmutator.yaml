@@ -1,0 +1,12 @@
+apiVersion: api.ialexegorov.neoflex.ru/v1alpha1
+kind: WebhookMutator
+metadata:
+  labels:
+    app.kubernetes.io/name: webhookmutator
+    app.kubernetes.io/instance: webhookmutator-sample
+    app.kubernetes.io/part-of: webhook-v1
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: webhook-v1
+  name: webhookmutator-sample
+spec:
+  foo: "bar"
