@@ -23,6 +23,7 @@ import (
 	"k8s.io/api/admissionregistration/v1beta1"
 	v1 "k8s.io/api/apps/v1"
 	v12 "k8s.io/api/core/v1"
+	v13 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -38,6 +39,15 @@ var logger = log.Log.WithName("controller_scaler")
 type WebhookMutatorReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+}
+
+type WebhookResources struct {
+	Deployment                   *v1.Deployment
+	Service                      *v12.Service
+	ServiceAccount               *v12.ServiceAccount
+	MutatingWebhookConfiguration *v1beta1.MutatingWebhookConfiguration
+	ClusterRole                  *v13.ClusterRole
+	ClusterRoleBinding           *v13.ClusterRoleBinding
 }
 
 //+kubebuilder:rbac:groups=api.ialexegorov.neoflex.ru,resources=webhookmutators,verbs=get;list;watch;create;update;patch;delete
@@ -63,6 +73,53 @@ func (r *WebhookMutatorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		operatorLogger.Info(fmt.Sprintf("YYYY cyka!!!"))
 		return ctrl.Result{}, nil
 	}
+
+	err, webhookResources := createResources()
+	if err != nil {
+		operatorLogger.Info(fmt.Sprintf("Couldn't create resources %v", err))
+		return ctrl.Result{}, nil
+	}
+
+	//webhooks:
+	//	sideEffects: "None"
+	//	caBundle: {{ .Values.cert.caBundle | b64enc }}
+
+	operatorLogger.Info("Creating Deployment")
+	err = r.Create(ctx, webhookResources.Deployment)
+	if err != nil {
+		return ctrl.Result{}, nil
+	}
+
+	operatorLogger.Info("Creating MutatingWebhookConfiguration")
+	err = r.Create(ctx, webhookResources.MutatingWebhookConfiguration)
+	if err != nil {
+		return ctrl.Result{}, nil
+	}
+
+	operatorLogger.Info("Creating Service")
+	err = r.Create(ctx, webhookResources.Service)
+	if err != nil {
+		return ctrl.Result{}, nil
+	}
+
+	operatorLogger.Info("Creating ServiceAccount")
+	err = r.Create(ctx, webhookResources.ServiceAccount)
+	if err != nil {
+		return ctrl.Result{}, nil
+	}
+
+	operatorLogger.Info(fmt.Sprintf("Creating %v : %v",
+		webhookResources.Service.Name, webhookResources.Service.Namespace))
+	err = r.Create(ctx, webhookResources.Service)
+	if err != nil {
+		return ctrl.Result{}, nil
+	}
+
+	return ctrl.Result{RequeueAfter: time.Duration(30 * time.Second)}, nil
+}
+
+func createResources() (error, WebhookResources) {
+	webhookResources := WebhookResources{}
 
 	var timeoutSeconds int32 = 30
 	servicePath := "/mutate/deployments"
@@ -120,6 +177,45 @@ func (r *WebhookMutatorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			},
 		},
 	}
+
+	admissionWebhookServiceAccount := &v12.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "aegorov-admission-webhook",
+			Namespace: "default",
+		},
+	}
+	clusterRole := &v13.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "aegorov-admission-webhook",
+			Namespace: "default",
+		},
+		Rules: []v13.PolicyRule{
+			{
+				Verbs:     []string{"get", "watch", "list"},
+				APIGroups: []string{""},
+				Resources: []string{"pods"},
+			},
+		},
+	}
+	clusterRoleBinding := &v13.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "",
+			Namespace: "",
+		},
+		Subjects: []v13.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      "aegorov-admission-webhook",
+				Namespace: "default",
+			},
+		},
+		RoleRef: v13.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "aegorov-admission-webhook",
+		},
+	}
+
 	mutationWebhookConfiguration := &v1beta1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "mutation-webhook-configuration",
@@ -160,32 +256,16 @@ func (r *WebhookMutatorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		},
 	}
 
-	//webhooks:
-	//	sideEffects: "None"
-	//	caBundle: {{ .Values.cert.caBundle | b64enc }}
-
-	operatorLogger.Info(fmt.Sprintf("Creating %v : %v",
-		admissionWebhookDeployment.Name, admissionWebhookDeployment.Namespace))
-	err = r.Create(ctx, admissionWebhookDeployment)
-	if err != nil {
-		return ctrl.Result{}, nil
+	webhookResources = WebhookResources{
+		Deployment:                   admissionWebhookDeployment,
+		Service:                      admissionWebhookService,
+		ServiceAccount:               admissionWebhookServiceAccount,
+		MutatingWebhookConfiguration: mutationWebhookConfiguration,
+		ClusterRole:                  clusterRole,
+		ClusterRoleBinding:           clusterRoleBinding,
 	}
 
-	operatorLogger.Info(fmt.Sprintf("Creating %v : %v",
-		mutationWebhookConfiguration.Name, mutationWebhookConfiguration.Namespace))
-	err = r.Create(ctx, mutationWebhookConfiguration)
-	if err != nil {
-		return ctrl.Result{}, nil
-	}
-
-	operatorLogger.Info(fmt.Sprintf("Creating %v : %v",
-		admissionWebhookService.Name, admissionWebhookService.Namespace))
-	err = r.Create(ctx, admissionWebhookService)
-	if err != nil {
-		return ctrl.Result{}, nil
-	}
-
-	return ctrl.Result{RequeueAfter: time.Duration(30 * time.Second)}, nil
+	return nil, webhookResources
 }
 
 // SetupWithManager sets up the controller with the Manager.
