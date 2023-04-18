@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 	apiv1alpha1 "github.com/IAlexEgorov/webhook-v1/api/v1alpha1"
-	"k8s.io/api/admissionregistration/v1beta1"
+	v14 "k8s.io/api/admissionregistration/v1"
 	v1 "k8s.io/api/apps/v1"
 	v12 "k8s.io/api/core/v1"
 	v13 "k8s.io/api/rbac/v1"
@@ -44,7 +44,7 @@ type WebhookResources struct {
 	Deployment                   *v1.Deployment
 	Service                      *v12.Service
 	ServiceAccount               *v12.ServiceAccount
-	MutatingWebhookConfiguration *v1beta1.MutatingWebhookConfiguration
+	MutatingWebhookConfiguration *v14.MutatingWebhookConfiguration
 	ClusterRole                  *v13.ClusterRole
 	ClusterRoleBinding           *v13.ClusterRoleBinding
 	Secret                       *v12.Secret
@@ -118,10 +118,11 @@ func (r *WebhookMutatorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	operatorLogger.Info("Creating MutatingWebhookConfiguration")
-	err = r.Update(ctx, webhookResources.MutatingWebhookConfiguration)
+	err = r.Create(ctx, webhookResources.MutatingWebhookConfiguration)
 	if err != nil {
 		return ctrl.Result{}, nil
 	}
+	operatorLogger.Info("   ----- End of Creating block -----")
 
 	return ctrl.Result{RequeueAfter: time.Duration(30 * time.Second)}, nil
 }
@@ -130,8 +131,8 @@ func createResources() (webhookResources WebhookResources) {
 
 	var timeoutSeconds int32 = 30
 	servicePath := "/mutate/deployments"
-	var sideEffect v1beta1.SideEffectClass = "None"
-	var operationType v1beta1.OperationType = "CREATE"
+	var sideEffect v14.SideEffectClass = "None"
+	var operationType v14.OperationType = "CREATE"
 
 	admissionWebhookConfigMap := &v12.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -286,30 +287,31 @@ func createResources() (webhookResources WebhookResources) {
 		},
 	}
 
-	mutationWebhookConfiguration := &v1beta1.MutatingWebhookConfiguration{
+	mutationWebhookConfiguration := &v14.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "mutation-webhook-configuration",
 			Namespace: "default",
 		},
-		Webhooks: []v1beta1.MutatingWebhook{
+		Webhooks: []v14.MutatingWebhook{
 			{
 				Name: "admission-webhook-service.default.svc",
-				ClientConfig: v1beta1.WebhookClientConfig{
-					Service: &v1beta1.ServiceReference{
+				ClientConfig: v14.WebhookClientConfig{
+					Service: &v14.ServiceReference{
 						Namespace: "default",
 						Name:      "admission-webhook-service",
 						Path:      &servicePath,
 					},
 					CABundle: []byte("LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURiakNDQWxhZ0F3SUJBZ0lVWHVMYW1NSms5bEhORjZEOGpudkZxZHMxNDhvd0RRWUpLb1pJaHZjTkFRRUwKQlFBd1R6RUxNQWtHQTFVRUJoTUNVbFV4RURBT0JnTlZCQWdUQjBWNFlXMXdiR1V4RHpBTkJnTlZCQWNUQmsxdgpjMk52ZHpFUU1BNEdBMVVFQ2hNSFJYaGhiWEJzWlRFTE1Ba0dBMVVFQ3hNQ1EwRXdIaGNOTWpNd05ERTNNVEF5Ck56QXdXaGNOTWpnd05ERTFNVEF5TnpBd1dqQlBNUXN3Q1FZRFZRUUdFd0pTVlRFUU1BNEdBMVVFQ0JNSFJYaGgKYlhCc1pURVBNQTBHQTFVRUJ4TUdUVzl6WTI5M01SQXdEZ1lEVlFRS0V3ZEZlR0Z0Y0d4bE1Rc3dDUVlEVlFRTApFd0pEUVRDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTWlGd2dlUGFrdC91dy9RCjl1N21pWmpndG9nWXl3U0xZcTN6c0I0RFQyK0twUEVpbTFVVFRCVHZzVWNnYTk5cUt5bTFxZXF3WWJSa3RIZHUKZGwzOHZTSEY0K0lOYmFpem1mY1hrSTFVV3I4dmFHaHVCc0lRd2lWdm9UODFialFSTk1MbWNma2dYM09BakJQSgo5U2UwSnpjbGY0dUVEd2R4R0xzdnJieElKWGk1UmxZVjZwekFiUUF0UE5pYWc0aExDaFpqY1FmRW1Cc1oyMjBkCncxMDZzeFVmRWplYjZoRWVvYnhjTHdzcTlGY00ySGJXMm8xYmtDY3ZuSm4ySEYzNXRlSmlDbHFBRWczaFpQOEYKOFdQKzNXREVHUVV2eFdWSFJtaEZqb0RNRFdDV1QzWkZZaVQvZU12c1l6c3duM2tpS2dON29jWnhXNXJvN3ZFQQpEeDI4K3ljQ0F3RUFBYU5DTUVBd0RnWURWUjBQQVFIL0JBUURBZ0VHTUE4R0ExVWRFd0VCL3dRRk1BTUJBZjh3CkhRWURWUjBPQkJZRUZQdDUzT0s3R0FMd3RidlVWNXorNXlvN2ZTU1lNQTBHQ1NxR1NJYjNEUUVCQ3dVQUE0SUIKQVFBWnhwcEs0eXhSVW1sckM5Q3BDR3M0VzR5LzNmTUtCVTRPT2Y3Q1R3VlIzQVc2bEdUbXYvTitCM01Wd3d1OQpESjJsYmhiTUhpSGdnMUdSd1IvN0t5T2FmeFQ0YkNPUG9NUjBZRU1Db0J6R3pRNHIvRUp1aStyRk03RGY1Mnh2ClJSOHprTnJIcXk5KzB1b1JackltRnNqYWNKOFBhUEdsZmV0eWFISEVGTDFNSXZkeGtEZ0xGYVBlcTZBaVJhT3AKd0VZenVhUnRsRDNUbVVSSXN1Yk9tN3Bpc1lITUN6NFdUeERzd2QzVU9OUGxpQlU2ZkVsZzZkNVFlMDVyWGc4YQpTMURnQThFKzRJZHkralZ0dk9YcmJTa3d0RDRYY2w3RWppQXk5TVY5TGlnelNCdmFReXlvb3FGR3FMYU43WDV3CkNtZVlxLzNHNUpVb2wzR3J5bENkekNDUQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0t"),
 				},
-				Rules: []v1beta1.RuleWithOperations{{
-					Operations: []v1beta1.OperationType{operationType},
-					Rule: v1beta1.Rule{
-						APIGroups:   []string{"apps"},
-						APIVersions: []string{"v1"},
-						Resources:   []string{"statefulsets"},
+				Rules: []v14.RuleWithOperations{
+					{
+						Operations: []v14.OperationType{operationType},
+						Rule: v14.Rule{
+							APIGroups:   []string{"apps"},
+							APIVersions: []string{"v1"},
+							Resources:   []string{"statefulsets"},
+						},
 					},
-				},
 				},
 				ObjectSelector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{"example-webhook-enabled": "true"},
