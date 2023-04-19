@@ -17,18 +17,23 @@ limitations under the License.
 package controllers
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	apiv1alpha1 "github.com/IAlexEgorov/webhook-v1/api/v1alpha1"
 	"github.com/go-logr/logr"
 	v14 "k8s.io/api/admissionregistration/v1"
-	v1 "k8s.io/api/apps/v1"
-	v12 "k8s.io/api/core/v1"
+	v1apps "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/core/v1"
 	v13 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"os"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -44,14 +49,14 @@ type WebhookMutatorReconciler struct {
 }
 
 type WebhookResources struct {
-	Deployment                   *v1.Deployment
-	Service                      *v12.Service
-	ServiceAccount               *v12.ServiceAccount
+	Deployment                   *v1apps.Deployment
+	Service                      *v1.Service
+	ServiceAccount               *v1.ServiceAccount
 	MutatingWebhookConfiguration *v14.MutatingWebhookConfiguration
 	ClusterRole                  *v13.ClusterRole
 	ClusterRoleBinding           *v13.ClusterRoleBinding
-	Secret                       *v12.Secret
-	ConfigMap                    *v12.ConfigMap
+	Secret                       *v1.Secret
+	ConfigMap                    *v1.ConfigMap
 }
 
 //+kubebuilder:rbac:groups=api.ialexegorov.neoflex.ru,resources=webhookmutators,verbs=get;list;watch;create;update;patch;delete
@@ -69,9 +74,17 @@ func (r *WebhookMutatorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
+	clientset, err := getKubernetesClient()
+	if err != nil {
+		return ctrl.Result{}, nil
+	}
+
 	factory := serializer.NewCodecFactory(r.Scheme)
 	decoder := factory.UniversalDeserializer()
 
+	// ----------------------
+	// Declaration Resources
+	// ----------------------
 	webhookResources := WebhookResources{}
 	webhookResources.declareConfigMap(decoder, operatorLogger)
 	webhookResources.declareSecret(decoder, operatorLogger)
@@ -85,15 +98,333 @@ func (r *WebhookMutatorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	webhookResources.declareMutatingWebhookConfiguration(decoder, operatorLogger)
 
+	// -----------------------
+	// Installation Resources
+	// -----------------------
+	webhookResources.createOrUpdateConfigMap(clientset, &ctx, &operatorLogger)
+	webhookResources.createOrUpdateSecret(clientset, &ctx, &operatorLogger)
+
+	webhookResources.createOrUpdateServiceAccount(clientset, &ctx, &operatorLogger)
+	webhookResources.createOrUpdateClusterRole(clientset, &ctx, &operatorLogger)
+	webhookResources.createOrUpdateClusterRoleBinding(clientset, &ctx, &operatorLogger)
+
+	webhookResources.createOrUpdateDeployment(clientset, &ctx, &operatorLogger)
+	webhookResources.createOrUpdateService(clientset, &ctx, &operatorLogger)
+
+	webhookResources.createOrUpdateMutatingWebhookConfiguration(clientset, &ctx, &operatorLogger)
+
 	return ctrl.Result{RequeueAfter: time.Duration(30 * time.Second)}, nil
 }
 
-func compactValue(v string) string {
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, []byte(v)); err != nil {
-		panic("Hard coded json strings broken!")
+func getKubernetesClient() (*kubernetes.Clientset, error) {
+	var config *rest.Config
+	var err error
+
+	if config, err = rest.InClusterConfig(); err != nil {
+		kubeconfig := os.Getenv("KUBECONFIG")
+		if kubeconfig == "" {
+			kubeconfig = os.Getenv("HOME") + "/.kube/config"
+		}
+		if config, err = clientcmd.BuildConfigFromFlags("", kubeconfig); err != nil {
+			return nil, fmt.Errorf("failed to build Kubernetes configuration: %v", err)
+		}
 	}
-	return compact.String()
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Kubernetes clientset: %v", err)
+	}
+
+	return clientset, nil
+}
+func (w *WebhookResources) createOrUpdateDeployment(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
+
+	//labelSelector := labels.Set(w.Deployment.Labels).AsSelector()
+	deployments, err := clientset.AppsV1().Deployments(w.Deployment.Namespace).List(*ctx, metav1.ListOptions{
+		LabelSelector: "app=aegorov-admission-webhook",
+	})
+
+	if len(deployments.Items) == 0 {
+		_, err = clientset.AppsV1().Deployments(w.Deployment.Namespace).Create(context.Background(), w.Deployment, metav1.CreateOptions{})
+		if err != nil {
+			operatorLogger.Error(err, fmt.Sprintf("Failed to create deployment: %v", w.Deployment.GetName()))
+			return
+		}
+		operatorLogger.Info(fmt.Sprintf("Deployment has created: %s\n", w.Deployment.GetName()))
+		return
+	}
+
+	for _, deploy := range deployments.Items {
+		operatorLogger.Info(fmt.Sprintf("Found deployment %s\n", deploy.GetName()))
+		_, err = clientset.AppsV1().Deployments(w.Deployment.Namespace).Get(context.Background(), deploy.GetName(), metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// If the deployment doesn't exist, create a new one
+				_, err = clientset.AppsV1().Deployments(w.Deployment.Namespace).Create(context.Background(), &deploy, metav1.CreateOptions{})
+				if err != nil {
+					operatorLogger.Error(err, fmt.Sprintf("Failed to create deployment: %v", deploy.GetName()))
+				}
+			} else {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to get deployment: %v", deploy.GetName()))
+			}
+		} else {
+			// If the deployment exists, update it
+			_, err = clientset.AppsV1().Deployments(w.Deployment.Namespace).Update(context.Background(), &deploy, metav1.UpdateOptions{})
+			if err != nil {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to update deployment: %v", deploy.GetName()))
+			}
+		}
+	}
+}
+func (w *WebhookResources) createOrUpdateService(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
+
+	//labelSelector := labels.Set(w.Service.Labels).AsSelector()
+	services, err := clientset.CoreV1().Services(w.Service.Namespace).List(*ctx, metav1.ListOptions{
+		LabelSelector: "app=aegorov-admission-webhook",
+	})
+
+	if len(services.Items) == 0 {
+		_, err = clientset.CoreV1().Services(w.Service.Namespace).Create(context.Background(), w.Service, metav1.CreateOptions{})
+		if err != nil {
+			operatorLogger.Error(err, fmt.Sprintf("Failed to create service: %v", w.Service.GetName()))
+		}
+		operatorLogger.Info(fmt.Sprintf("Service has created: %s\n", w.Service.GetName()))
+		return
+	}
+
+	for _, svc := range services.Items {
+		operatorLogger.Info(fmt.Sprintf("Found service %s\n", svc.GetName()))
+		_, err = clientset.CoreV1().Services(w.Service.Namespace).Get(context.Background(), svc.GetName(), metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// If the service doesn't exist, create a new one
+				_, err = clientset.CoreV1().Services(w.Service.Namespace).Create(context.Background(), &svc, metav1.CreateOptions{})
+				if err != nil {
+					operatorLogger.Error(err, fmt.Sprintf("Failed to create service: %v", svc.GetName()))
+				}
+			} else {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to get service: %v", svc.GetName()))
+			}
+		} else {
+			// If the service exists, update it
+			_, err = clientset.CoreV1().Services(w.Service.Namespace).Update(context.Background(), &svc, metav1.UpdateOptions{})
+			if err != nil {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to update service: %v", svc.GetName()))
+			}
+		}
+	}
+}
+func (w *WebhookResources) createOrUpdateConfigMap(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
+
+	configmaps, err := clientset.CoreV1().ConfigMaps(w.ConfigMap.Namespace).List(*ctx, metav1.ListOptions{
+		LabelSelector: "app=aegorov-admission-webhook",
+	})
+
+	if len(configmaps.Items) == 0 {
+		_, err = clientset.CoreV1().ConfigMaps(w.ConfigMap.Namespace).Create(context.Background(), w.ConfigMap, metav1.CreateOptions{})
+		if err != nil {
+			operatorLogger.Error(err, fmt.Sprintf("Failed to create configmap: %v", w.ConfigMap.GetName()))
+		}
+		operatorLogger.Info(fmt.Sprintf("ConfigMap has created: %s\n", w.ConfigMap.GetName()))
+		return
+	}
+
+	for _, cm := range configmaps.Items {
+		operatorLogger.Info(fmt.Sprintf("Found configmap %s\n", cm.GetName()))
+		_, err = clientset.CoreV1().ConfigMaps(w.ConfigMap.Namespace).Get(context.Background(), cm.GetName(), metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// If the configmap doesn't exist, create a new one
+				_, err = clientset.CoreV1().ConfigMaps(w.ConfigMap.Namespace).Create(context.Background(), &cm, metav1.CreateOptions{})
+				if err != nil {
+					operatorLogger.Error(err, fmt.Sprintf("Failed to create configmap: %v", cm.GetName()))
+				}
+			} else {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to get configmap: %v", cm.GetName()))
+			}
+		} else {
+			// If the configmap exists, update it
+			_, err = clientset.CoreV1().ConfigMaps(w.ConfigMap.Namespace).Update(context.Background(), &cm, metav1.UpdateOptions{})
+			if err != nil {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to update configmap: %v", cm.GetName()))
+			}
+		}
+	}
+}
+func (w *WebhookResources) createOrUpdateSecret(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
+	secrets, err := clientset.CoreV1().Secrets(w.Secret.Namespace).List(*ctx, metav1.ListOptions{
+		LabelSelector: "app=aegorov-admission-webhook",
+	})
+
+	if len(secrets.Items) == 0 {
+		_, err = clientset.CoreV1().Secrets(w.Secret.Namespace).Create(context.Background(), w.Secret, metav1.CreateOptions{})
+		if err != nil {
+			operatorLogger.Error(err, fmt.Sprintf("Failed to create secret: %v", w.Secret.GetName()))
+		}
+		operatorLogger.Info(fmt.Sprintf("Secret has created: %s\n", w.Secret.GetName()))
+		return
+	}
+
+	for _, secret := range secrets.Items {
+		operatorLogger.Info(fmt.Sprintf("Found secret %s\n", secret.GetName()))
+		_, err = clientset.CoreV1().Secrets(w.Secret.Namespace).Get(context.Background(), secret.GetName(), metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// If the configmap doesn't exist, create a new one
+				_, err = clientset.CoreV1().Secrets(w.Secret.Namespace).Create(context.Background(), &secret, metav1.CreateOptions{})
+				if err != nil {
+					operatorLogger.Error(err, fmt.Sprintf("Failed to create secret: %v", secret.GetName()))
+				}
+			} else {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to get secret: %v", secret.GetName()))
+			}
+		} else {
+			// If the configmap exists, update it
+			_, err = clientset.CoreV1().Secrets(w.Secret.Namespace).Update(context.Background(), &secret, metav1.UpdateOptions{})
+			if err != nil {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to update secret: %v", secret.GetName()))
+			}
+		}
+	}
+}
+func (w *WebhookResources) createOrUpdateServiceAccount(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
+
+	_, err := clientset.CoreV1().ServiceAccounts(w.ServiceAccount.Namespace).Get(context.Background(), w.ServiceAccount.Name, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// If the ServiceAccount doesn't exist, create a new one
+			_, err = clientset.CoreV1().ServiceAccounts(w.ServiceAccount.Namespace).Create(context.Background(), w.ServiceAccount, metav1.CreateOptions{})
+			if err != nil {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to create ServiceAccount: %v", w.ServiceAccount.GetName()))
+			}
+			operatorLogger.Info(fmt.Sprintf("ServiceAccount has been created: %s\n", w.ServiceAccount.GetName()))
+			return
+		} else {
+			operatorLogger.Error(err, fmt.Sprintf("Failed to get ServiceAccount: %v", w.ServiceAccount.GetName()))
+			return
+		}
+	}
+
+	// If the ServiceAccount exists, update it
+	_, err = clientset.CoreV1().ServiceAccounts(w.ServiceAccount.Namespace).Update(context.Background(), w.ServiceAccount, metav1.UpdateOptions{})
+	if err != nil {
+		operatorLogger.Error(err, fmt.Sprintf("Failed to update ServiceAccount: %v", w.ServiceAccount.GetName()))
+		return
+	}
+	operatorLogger.Info(fmt.Sprintf("ServiceAccount has been updated: %s\n", w.ServiceAccount.GetName()))
+}
+func (w *WebhookResources) createOrUpdateClusterRole(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
+
+	//labelSelector := labels.Set(w.ClusterRole.Labels).AsSelector()
+	clusterRoles, err := clientset.RbacV1().ClusterRoles().List(*ctx, metav1.ListOptions{
+		LabelSelector: "app=aegorov-admission-webhook",
+	})
+
+	if len(clusterRoles.Items) == 0 {
+		_, err = clientset.RbacV1().ClusterRoles().Create(context.Background(), w.ClusterRole, metav1.CreateOptions{})
+		if err != nil {
+			operatorLogger.Error(err, fmt.Sprintf("Failed to create ClusterRole: %v", w.ClusterRole.GetName()))
+		}
+		operatorLogger.Info(fmt.Sprintf("ClusterRole has created: %s\n", w.ClusterRole.GetName()))
+		return
+	}
+
+	for _, clusterRole := range clusterRoles.Items {
+		operatorLogger.Info(fmt.Sprintf("Found ClusterRole %s\n", clusterRole.GetName()))
+		_, err = clientset.RbacV1().ClusterRoles().Get(context.Background(), clusterRole.GetName(), metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// If the ClusterRole doesn't exist, create a new one
+				_, err = clientset.RbacV1().ClusterRoles().Create(context.Background(), &clusterRole, metav1.CreateOptions{})
+				if err != nil {
+					operatorLogger.Error(err, fmt.Sprintf("Failed to create ClusterRole: %v", clusterRole.GetName()))
+				}
+			} else {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to get ClusterRole: %v", clusterRole.GetName()))
+			}
+		} else {
+			// If the ClusterRole exists, update it
+			_, err = clientset.RbacV1().ClusterRoles().Update(context.Background(), &clusterRole, metav1.UpdateOptions{})
+			if err != nil {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to update ClusterRole: %v", clusterRole.GetName()))
+			}
+		}
+	}
+}
+func (w *WebhookResources) createOrUpdateClusterRoleBinding(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
+
+	//labelSelector := labels.Set(w.ClusterRoleBinding.Labels).AsSelector()
+	clusterRoleBindings, err := clientset.RbacV1().ClusterRoleBindings().List(*ctx, metav1.ListOptions{
+		LabelSelector: "app=aegorov-admission-webhook",
+	})
+
+	if len(clusterRoleBindings.Items) == 0 {
+		_, err = clientset.RbacV1().ClusterRoleBindings().Create(context.Background(), w.ClusterRoleBinding, metav1.CreateOptions{})
+		if err != nil {
+			operatorLogger.Error(err, fmt.Sprintf("Failed to create cluster role binding: %v", w.ClusterRoleBinding.GetName()))
+		}
+		operatorLogger.Info(fmt.Sprintf("Cluster role binding has created: %s\n", w.ClusterRoleBinding.GetName()))
+		return
+	}
+
+	for _, crb := range clusterRoleBindings.Items {
+		operatorLogger.Info(fmt.Sprintf("Found cluster role binding %s\n", crb.GetName()))
+		_, err = clientset.RbacV1().ClusterRoleBindings().Get(context.Background(), crb.GetName(), metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// If the cluster role binding doesn't exist, create a new one
+				_, err = clientset.RbacV1().ClusterRoleBindings().Create(context.Background(), &crb, metav1.CreateOptions{})
+				if err != nil {
+					operatorLogger.Error(err, fmt.Sprintf("Failed to create cluster role binding: %v", crb.GetName()))
+				}
+			} else {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to get cluster role binding: %v", crb.GetName()))
+			}
+		} else {
+			// If the cluster role binding exists, update it
+			_, err = clientset.RbacV1().ClusterRoleBindings().Update(context.Background(), &crb, metav1.UpdateOptions{})
+			if err != nil {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to update cluster role binding: %v", crb.GetName()))
+			}
+		}
+	}
+}
+func (w *WebhookResources) createOrUpdateMutatingWebhookConfiguration(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
+
+	configurations, err := clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().List(*ctx, metav1.ListOptions{})
+	if err != nil {
+		operatorLogger.Error(err, "Failed to get MutatingWebhookConfigurations")
+		return
+	}
+
+	for _, config := range configurations.Items {
+		if config.Name == w.MutatingWebhookConfiguration.Name {
+			operatorLogger.Info(fmt.Sprintf("Found MutatingWebhookConfiguration %s\n", config.Name))
+			existingConfig, err := clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), w.MutatingWebhookConfiguration.Name, metav1.GetOptions{})
+			if err != nil {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to get MutatingWebhookConfiguration: %v", w.MutatingWebhookConfiguration.Name))
+				continue
+			}
+
+			// Update the MutatingWebhookConfiguration
+			existingConfig.Webhooks = w.MutatingWebhookConfiguration.Webhooks
+			_, err = clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Update(context.Background(), existingConfig, metav1.UpdateOptions{})
+			if err != nil {
+				operatorLogger.Error(err, fmt.Sprintf("Failed to update MutatingWebhookConfiguration: %v", w.MutatingWebhookConfiguration.Name))
+				continue
+			}
+			operatorLogger.Info(fmt.Sprintf("MutatingWebhookConfiguration %s updated successfully", w.MutatingWebhookConfiguration.Name))
+			return
+		}
+	}
+
+	// If the MutatingWebhookConfiguration doesn't exist, create a new one
+	_, err = clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Create(context.Background(), w.MutatingWebhookConfiguration, metav1.CreateOptions{})
+	if err != nil {
+		operatorLogger.Error(err, fmt.Sprintf("Failed to create MutatingWebhookConfiguration: %v", w.MutatingWebhookConfiguration.Name))
+		return
+	}
+	operatorLogger.Info(fmt.Sprintf("MutatingWebhookConfiguration %s created successfully", w.MutatingWebhookConfiguration.Name))
 }
 
 func (w *WebhookResources) declareConfigMap(decoder runtime.Decoder, operatorLogger logr.Logger) {
@@ -103,6 +434,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: webhook-config
+  labels:
+    aegorov: webhook
 data:
   config.yaml: |
     general:
@@ -125,7 +458,7 @@ data:
 		operatorLogger.Error(err, err.Error())
 	}
 
-	w.ConfigMap = obj.(*v12.ConfigMap)
+	w.ConfigMap = obj.(*v1.ConfigMap)
 	operatorLogger.Info("ConfigMap has added")
 }
 func (w *WebhookResources) declareDeployment(decoder runtime.Decoder, operatorLogger logr.Logger) {
@@ -136,6 +469,7 @@ metadata:
   name: aegorov-admission-webhook
   namespace: default
   labels:
+    aegorov: webhook
     app: aegorov-admission-webhook
 spec:
   replicas: 1
@@ -182,7 +516,7 @@ spec:
 		operatorLogger.Error(err, err.Error())
 	}
 
-	w.Deployment = obj.(*v1.Deployment)
+	w.Deployment = obj.(*v1apps.Deployment)
 	operatorLogger.Info("Deployment has added")
 }
 func (w *WebhookResources) declareService(decoder runtime.Decoder, operatorLogger logr.Logger) {
@@ -192,6 +526,8 @@ kind: Service
 metadata:
   name: aegorov-admission
   namespace: default
+  labels:
+    aegorov: webhook
 spec:
   selector:
     app: aegorov-admission-webhook
@@ -208,7 +544,7 @@ spec:
 		operatorLogger.Error(err, err.Error())
 	}
 
-	w.Service = obj.(*v12.Service)
+	w.Service = obj.(*v1.Service)
 	operatorLogger.Info("Service has added")
 }
 func (w *WebhookResources) declareServiceAccount(decoder runtime.Decoder, operatorLogger logr.Logger) {
@@ -217,14 +553,16 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: aegorov-admission-webhook
-  namespace: default`)
+  namespace: default
+  labels:
+    aegorov: webhook`)
 
 	obj, _, err := decoder.Decode([]byte(input), nil, nil)
 	if err != nil {
 		operatorLogger.Error(err, err.Error())
 	}
 
-	w.ServiceAccount = obj.(*v12.ServiceAccount)
+	w.ServiceAccount = obj.(*v1.ServiceAccount)
 	operatorLogger.Info("ServiceAccount has added")
 }
 func (w *WebhookResources) declareClusterRole(decoder runtime.Decoder, operatorLogger logr.Logger) {
@@ -233,6 +571,8 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: aegorov-admission-webhook
+  labels:
+    aegorov: webhook
 rules:
 - apiGroups: [""]
   resources: ["pods"]
@@ -252,6 +592,8 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: aegorov-admission-webhook
+  labels:
+    aegorov: webhook
 subjects:
 - kind: ServiceAccount
   name: aegorov-admission-webhook
@@ -275,6 +617,8 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: aegorov-admission-tls
+  labels:
+    aegorov: webhook
 type: Opaque
 data:
   tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURiakNDQWxhZ0F3SUJBZ0lVWHVMYW1NSms5bEhORjZEOGpudkZxZHMxNDhvd0RRWUpLb1pJaHZjTkFRRUwKQlFBd1R6RUxNQWtHQTFVRUJoTUNVbFV4RURBT0JnTlZCQWdUQjBWNFlXMXdiR1V4RHpBTkJnTlZCQWNUQmsxdgpjMk52ZHpFUU1BNEdBMVVFQ2hNSFJYaGhiWEJzWlRFTE1Ba0dBMVVFQ3hNQ1EwRXdIaGNOTWpNd05ERTNNVEF5Ck56QXdXaGNOTWpnd05ERTFNVEF5TnpBd1dqQlBNUXN3Q1FZRFZRUUdFd0pTVlRFUU1BNEdBMVVFQ0JNSFJYaGgKYlhCc1pURVBNQTBHQTFVRUJ4TUdUVzl6WTI5M01SQXdEZ1lEVlFRS0V3ZEZlR0Z0Y0d4bE1Rc3dDUVlEVlFRTApFd0pEUVRDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTWlGd2dlUGFrdC91dy9RCjl1N21pWmpndG9nWXl3U0xZcTN6c0I0RFQyK0twUEVpbTFVVFRCVHZzVWNnYTk5cUt5bTFxZXF3WWJSa3RIZHUKZGwzOHZTSEY0K0lOYmFpem1mY1hrSTFVV3I4dmFHaHVCc0lRd2lWdm9UODFialFSTk1MbWNma2dYM09BakJQSgo5U2UwSnpjbGY0dUVEd2R4R0xzdnJieElKWGk1UmxZVjZwekFiUUF0UE5pYWc0aExDaFpqY1FmRW1Cc1oyMjBkCncxMDZzeFVmRWplYjZoRWVvYnhjTHdzcTlGY00ySGJXMm8xYmtDY3ZuSm4ySEYzNXRlSmlDbHFBRWczaFpQOEYKOFdQKzNXREVHUVV2eFdWSFJtaEZqb0RNRFdDV1QzWkZZaVQvZU12c1l6c3duM2tpS2dON29jWnhXNXJvN3ZFQQpEeDI4K3ljQ0F3RUFBYU5DTUVBd0RnWURWUjBQQVFIL0JBUURBZ0VHTUE4R0ExVWRFd0VCL3dRRk1BTUJBZjh3CkhRWURWUjBPQkJZRUZQdDUzT0s3R0FMd3RidlVWNXorNXlvN2ZTU1lNQTBHQ1NxR1NJYjNEUUVCQ3dVQUE0SUIKQVFBWnhwcEs0eXhSVW1sckM5Q3BDR3M0VzR5LzNmTUtCVTRPT2Y3Q1R3VlIzQVc2bEdUbXYvTitCM01Wd3d1OQpESjJsYmhiTUhpSGdnMUdSd1IvN0t5T2FmeFQ0YkNPUG9NUjBZRU1Db0J6R3pRNHIvRUp1aStyRk03RGY1Mnh2ClJSOHprTnJIcXk5KzB1b1JackltRnNqYWNKOFBhUEdsZmV0eWFISEVGTDFNSXZkeGtEZ0xGYVBlcTZBaVJhT3AKd0VZenVhUnRsRDNUbVVSSXN1Yk9tN3Bpc1lITUN6NFdUeERzd2QzVU9OUGxpQlU2ZkVsZzZkNVFlMDVyWGc4YQpTMURnQThFKzRJZHkralZ0dk9YcmJTa3d0RDRYY2w3RWppQXk5TVY5TGlnelNCdmFReXlvb3FGR3FMYU43WDV3CkNtZVlxLzNHNUpVb2wzR3J5bENkekNDUQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0t
@@ -285,7 +629,7 @@ data:
 		operatorLogger.Error(err, err.Error())
 	}
 
-	w.Secret = obj.(*v12.Secret)
+	w.Secret = obj.(*v1.Secret)
 	operatorLogger.Info("Secret has added")
 }
 func (w *WebhookResources) declareMutatingWebhookConfiguration(decoder runtime.Decoder, operatorLogger logr.Logger) {
@@ -294,6 +638,8 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
   name: aegorov-admission
+  labels:
+    aegorov: webhook
 webhooks:
   - name: aegorov-admission.default.svc
     admissionReviewVersions:
