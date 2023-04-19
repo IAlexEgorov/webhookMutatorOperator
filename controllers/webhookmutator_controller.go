@@ -141,7 +141,7 @@ func (w *WebhookResources) createOrUpdateDeployment(clientset *kubernetes.Client
 
 	//labelSelector := labels.Set(w.Deployment.Labels).AsSelector()
 	deployments, err := clientset.AppsV1().Deployments(w.Deployment.Namespace).List(*ctx, metav1.ListOptions{
-		LabelSelector: "app=aegorov-admission-webhook",
+		LabelSelector: "aegorov=webhook",
 	})
 
 	if len(deployments.Items) == 0 {
@@ -180,7 +180,7 @@ func (w *WebhookResources) createOrUpdateService(clientset *kubernetes.Clientset
 
 	//labelSelector := labels.Set(w.Service.Labels).AsSelector()
 	services, err := clientset.CoreV1().Services(w.Service.Namespace).List(*ctx, metav1.ListOptions{
-		LabelSelector: "app=aegorov-admission-webhook",
+		LabelSelector: "aegorov=webhook",
 	})
 
 	if len(services.Items) == 0 {
@@ -217,13 +217,14 @@ func (w *WebhookResources) createOrUpdateService(clientset *kubernetes.Clientset
 func (w *WebhookResources) createOrUpdateConfigMap(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
 
 	configmaps, err := clientset.CoreV1().ConfigMaps(w.ConfigMap.Namespace).List(*ctx, metav1.ListOptions{
-		LabelSelector: "app=aegorov-admission-webhook",
+		LabelSelector: "aegorov=webhook",
 	})
 
 	if len(configmaps.Items) == 0 {
 		_, err = clientset.CoreV1().ConfigMaps(w.ConfigMap.Namespace).Create(context.Background(), w.ConfigMap, metav1.CreateOptions{})
 		if err != nil {
 			operatorLogger.Error(err, fmt.Sprintf("Failed to create configmap: %v", w.ConfigMap.GetName()))
+			return
 		}
 		operatorLogger.Info(fmt.Sprintf("ConfigMap has created: %s\n", w.ConfigMap.GetName()))
 		return
@@ -253,7 +254,7 @@ func (w *WebhookResources) createOrUpdateConfigMap(clientset *kubernetes.Clients
 }
 func (w *WebhookResources) createOrUpdateSecret(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
 	secrets, err := clientset.CoreV1().Secrets(w.Secret.Namespace).List(*ctx, metav1.ListOptions{
-		LabelSelector: "app=aegorov-admission-webhook",
+		LabelSelector: "aegorov=webhook",
 	})
 
 	if len(secrets.Items) == 0 {
@@ -317,7 +318,7 @@ func (w *WebhookResources) createOrUpdateClusterRole(clientset *kubernetes.Clien
 
 	//labelSelector := labels.Set(w.ClusterRole.Labels).AsSelector()
 	clusterRoles, err := clientset.RbacV1().ClusterRoles().List(*ctx, metav1.ListOptions{
-		LabelSelector: "app=aegorov-admission-webhook",
+		LabelSelector: "aegorov=webhook",
 	})
 
 	if len(clusterRoles.Items) == 0 {
@@ -355,7 +356,7 @@ func (w *WebhookResources) createOrUpdateClusterRoleBinding(clientset *kubernete
 
 	//labelSelector := labels.Set(w.ClusterRoleBinding.Labels).AsSelector()
 	clusterRoleBindings, err := clientset.RbacV1().ClusterRoleBindings().List(*ctx, metav1.ListOptions{
-		LabelSelector: "app=aegorov-admission-webhook",
+		LabelSelector: "aegorov=webhook",
 	})
 
 	if len(clusterRoleBindings.Items) == 0 {
@@ -391,40 +392,25 @@ func (w *WebhookResources) createOrUpdateClusterRoleBinding(clientset *kubernete
 }
 func (w *WebhookResources) createOrUpdateMutatingWebhookConfiguration(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
 
-	configurations, err := clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().List(*ctx, metav1.ListOptions{})
+	configurations, err := clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().List(*ctx, metav1.ListOptions{
+		LabelSelector: "aegorov=webhook",
+	})
 	if err != nil {
 		operatorLogger.Error(err, "Failed to get MutatingWebhookConfigurations")
 		return
 	}
 
-	for _, config := range configurations.Items {
-		if config.Name == w.MutatingWebhookConfiguration.Name {
-			operatorLogger.Info(fmt.Sprintf("Found MutatingWebhookConfiguration %s\n", config.Name))
-			existingConfig, err := clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), w.MutatingWebhookConfiguration.Name, metav1.GetOptions{})
-			if err != nil {
-				operatorLogger.Error(err, fmt.Sprintf("Failed to get MutatingWebhookConfiguration: %v", w.MutatingWebhookConfiguration.Name))
-				continue
-			}
+	if len(configurations.Items) == 0 {
 
-			// Update the MutatingWebhookConfiguration
-			existingConfig.Webhooks = w.MutatingWebhookConfiguration.Webhooks
-			_, err = clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Update(context.Background(), existingConfig, metav1.UpdateOptions{})
-			if err != nil {
-				operatorLogger.Error(err, fmt.Sprintf("Failed to update MutatingWebhookConfiguration: %v", w.MutatingWebhookConfiguration.Name))
-				continue
-			}
-			operatorLogger.Info(fmt.Sprintf("MutatingWebhookConfiguration %s updated successfully", w.MutatingWebhookConfiguration.Name))
+		// If the MutatingWebhookConfiguration doesn't exist, create a new one
+		_, err = clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Create(context.Background(), w.MutatingWebhookConfiguration, metav1.CreateOptions{})
+		if err != nil {
+			operatorLogger.Error(err, fmt.Sprintf("Failed to create MutatingWebhookConfiguration: %v", w.MutatingWebhookConfiguration.Name))
 			return
 		}
-	}
+		operatorLogger.Info(fmt.Sprintf("MutatingWebhookConfiguration %s created successfully", w.MutatingWebhookConfiguration.Name))
 
-	// If the MutatingWebhookConfiguration doesn't exist, create a new one
-	_, err = clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Create(context.Background(), w.MutatingWebhookConfiguration, metav1.CreateOptions{})
-	if err != nil {
-		operatorLogger.Error(err, fmt.Sprintf("Failed to create MutatingWebhookConfiguration: %v", w.MutatingWebhookConfiguration.Name))
-		return
 	}
-	operatorLogger.Info(fmt.Sprintf("MutatingWebhookConfiguration %s created successfully", w.MutatingWebhookConfiguration.Name))
 }
 
 func (w *WebhookResources) declareConfigMap(decoder runtime.Decoder, operatorLogger logr.Logger) {
@@ -434,6 +420,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: webhook-config
+  namespace: default
   labels:
     aegorov: webhook
 data:
@@ -571,6 +558,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: aegorov-admission-webhook
+  namespace: default
   labels:
     aegorov: webhook
 rules:
@@ -592,6 +580,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: aegorov-admission-webhook
+  namespace: default
   labels:
     aegorov: webhook
 subjects:
@@ -617,6 +606,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: aegorov-admission-tls
+  namespace: default
   labels:
     aegorov: webhook
 type: Opaque
@@ -638,6 +628,7 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
   name: aegorov-admission
+  namespace: default
   labels:
     aegorov: webhook
 webhooks:
