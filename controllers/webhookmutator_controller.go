@@ -25,9 +25,8 @@ import (
 	v1apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	v13 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/client-go/kubernetes"
@@ -67,10 +66,23 @@ func (r *WebhookMutatorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	operatorLogger := logger
 	operatorLogger.Info("Reconcile called")
 
+	factory := serializer.NewCodecFactory(r.Scheme)
+	decoder := factory.UniversalDeserializer()
+
 	webhookMutator := &apiv1alpha1.WebhookMutator{}
+	webhookResources := WebhookResources{}
+
+	//if err := r.cleanupResourcesIfOperatorDeleted(); err != nil {
+	//	return ctrl.Result{}, err
+	//}
+
 	err := r.Get(ctx, req.NamespacedName, webhookMutator)
 	if err != nil {
-		operatorLogger.Info(fmt.Sprintf("YYYY cyka!!!"))
+		clientset, err := getKubernetesClient()
+		if err != nil {
+			return ctrl.Result{}, nil
+		}
+		webhookResources.deleteAllResources(clientset, &ctx, &operatorLogger)
 		return ctrl.Result{}, nil
 	}
 
@@ -79,13 +91,9 @@ func (r *WebhookMutatorReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
-	factory := serializer.NewCodecFactory(r.Scheme)
-	decoder := factory.UniversalDeserializer()
-
 	// ----------------------
 	// Declaration Resources
 	// ----------------------
-	webhookResources := WebhookResources{}
 	webhookResources.declareConfigMap(decoder, operatorLogger)
 	webhookResources.declareSecret(decoder, operatorLogger)
 
@@ -496,7 +504,8 @@ spec:
           secretName: aegorov-admission-tls
       - name: config-volume
         configMap:
-          name: webhook-config`)
+          name: webhook-config
+`)
 
 	obj, _, err := decoder.Decode([]byte(input), nil, nil)
 	if err != nil {
@@ -611,8 +620,9 @@ metadata:
     aegorov: webhook
 type: Opaque
 data:
-  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURiakNDQWxhZ0F3SUJBZ0lVWHVMYW1NSms5bEhORjZEOGpudkZxZHMxNDhvd0RRWUpLb1pJaHZjTkFRRUwKQlFBd1R6RUxNQWtHQTFVRUJoTUNVbFV4RURBT0JnTlZCQWdUQjBWNFlXMXdiR1V4RHpBTkJnTlZCQWNUQmsxdgpjMk52ZHpFUU1BNEdBMVVFQ2hNSFJYaGhiWEJzWlRFTE1Ba0dBMVVFQ3hNQ1EwRXdIaGNOTWpNd05ERTNNVEF5Ck56QXdXaGNOTWpnd05ERTFNVEF5TnpBd1dqQlBNUXN3Q1FZRFZRUUdFd0pTVlRFUU1BNEdBMVVFQ0JNSFJYaGgKYlhCc1pURVBNQTBHQTFVRUJ4TUdUVzl6WTI5M01SQXdEZ1lEVlFRS0V3ZEZlR0Z0Y0d4bE1Rc3dDUVlEVlFRTApFd0pEUVRDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTWlGd2dlUGFrdC91dy9RCjl1N21pWmpndG9nWXl3U0xZcTN6c0I0RFQyK0twUEVpbTFVVFRCVHZzVWNnYTk5cUt5bTFxZXF3WWJSa3RIZHUKZGwzOHZTSEY0K0lOYmFpem1mY1hrSTFVV3I4dmFHaHVCc0lRd2lWdm9UODFialFSTk1MbWNma2dYM09BakJQSgo5U2UwSnpjbGY0dUVEd2R4R0xzdnJieElKWGk1UmxZVjZwekFiUUF0UE5pYWc0aExDaFpqY1FmRW1Cc1oyMjBkCncxMDZzeFVmRWplYjZoRWVvYnhjTHdzcTlGY00ySGJXMm8xYmtDY3ZuSm4ySEYzNXRlSmlDbHFBRWczaFpQOEYKOFdQKzNXREVHUVV2eFdWSFJtaEZqb0RNRFdDV1QzWkZZaVQvZU12c1l6c3duM2tpS2dON29jWnhXNXJvN3ZFQQpEeDI4K3ljQ0F3RUFBYU5DTUVBd0RnWURWUjBQQVFIL0JBUURBZ0VHTUE4R0ExVWRFd0VCL3dRRk1BTUJBZjh3CkhRWURWUjBPQkJZRUZQdDUzT0s3R0FMd3RidlVWNXorNXlvN2ZTU1lNQTBHQ1NxR1NJYjNEUUVCQ3dVQUE0SUIKQVFBWnhwcEs0eXhSVW1sckM5Q3BDR3M0VzR5LzNmTUtCVTRPT2Y3Q1R3VlIzQVc2bEdUbXYvTitCM01Wd3d1OQpESjJsYmhiTUhpSGdnMUdSd1IvN0t5T2FmeFQ0YkNPUG9NUjBZRU1Db0J6R3pRNHIvRUp1aStyRk03RGY1Mnh2ClJSOHprTnJIcXk5KzB1b1JackltRnNqYWNKOFBhUEdsZmV0eWFISEVGTDFNSXZkeGtEZ0xGYVBlcTZBaVJhT3AKd0VZenVhUnRsRDNUbVVSSXN1Yk9tN3Bpc1lITUN6NFdUeERzd2QzVU9OUGxpQlU2ZkVsZzZkNVFlMDVyWGc4YQpTMURnQThFKzRJZHkralZ0dk9YcmJTa3d0RDRYY2w3RWppQXk5TVY5TGlnelNCdmFReXlvb3FGR3FMYU43WDV3CkNtZVlxLzNHNUpVb2wzR3J5bENkekNDUQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0t
-  tls.key: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFcEFJQkFBS0NBUUVBdERHdURnWmN0ditlTzdLN3o2anVmbTNuaEo1MWFkdHNQclFKS3VTS1JyU0xkVmdtCmNycEl5clpuVU9UVS85UHZKVkZldWJZc2ZyUHlodzZ6NERrWi9zdVZRaXEydEhHWTcvMGFJcnRpZnYrK3VRengKOHhTemNMSmZaR29nZ0FSeWY1ci9zTFV3bDVKWlF1c214dkFUSXh6WmR4dVBWR0tSUE1kdHhGY0NCSUhSN2gvTgpVU0tJZ1lsbWRmRGpGd04yOUxTQW5wME9MbWdSaFZHRkhPaTRsVkFKclh3VDk4RDdwV0JXWVpER1NZdWI5c0p3CmdhRjNiK0VVekNVN0Uwb25tb0ptK2dIeGpCYlM0blNWUXZsWG1hcHIzS2JFOFowUE9QZlU1QnNYSlp4U2UycGsKVlFmeUU3NjhkZ29BT0M0bUljMnVzcHdvZzd0cDAzTmREYlNpRHdJREFRQUJBb0lCQUMzYjR1Y3cyVkc5ZG1ETgpHUjA5YWcwRkhZSFQ3aC9WdHhPeU1BOFpnTk9EeVdaQTIvQWcxcnU0ZGt6UklDQkhxTG8vbmpMM1dSV1o2R1JVCjZwUnJFK0dUb0ZYcGx2d1BXUlBpdjA4Tmo0Q3d4N0pDeUNUTUpPck9pcFo4cCs3TXN2TWsyR1A1aVBkYVNKdE8KUzEwZjVrN3VYYTRCZHBYTVRCaEN6UDNHQXY1d09sQzg4b01CMkVRa0ZJbEJsaUlBQS92R0hJaVBGeFJLZ1dkOAova0NlRzB3WG5zaVlHTmw2cTRiNGV6aVVHZTF6L0JxTUJKRVBOak1MdzJHM1lnTDE3dVdlTHNJQVNVQ29TcFpzClF4MFY1REpWcnB1ZEpvVUFabnRHWUhJTUVva3BKYmg3eGthbU9sVWlKS0ZxNEZtKy81Zk9GZlJqN3FnR1BWSVYKTDFndW8va0NnWUVBMVJlU3RiWVIvb2dJN25qVzVNWSs1WEtmZFpMTURlWVVWdjA1M0ErR3Y5OUJzTE56cnJONAozeUhzK2VQYUU5MEFOOUhaV3lqQWtsSDZqUGV1S1ZjZ3NZb2J0eHhocGdIOVdDcXhjMktscnNDTVNHMUNqOTNXCmJudWk3QmZwRzAxdkExNkRJU2NoUkdIQU9jV0tkR1RsMmNobkhtUERGVzNNTzdSR01iZ0VOdU1DZ1lFQTJIcEoKVXZtWFp6Mm82dFpnQWdsRmh5YXFDd1ZBd3BjcUFCZDlHb0FFSllhdy84QnlUMHRCNFRZN1FsSWFiTGVobzE5WApSUURuU3BrYXlVRDd6dnArWHo5ZDR1MkcwK202ZzNpUEQ3NkRmemdZMUNPMkEzZlZ2U2VuWmJMSkNVRnRiLzdQCiszTFc1bjY4M2pSdGFGeERnUmNWaHN6Rkd2SGh4b2Rpem1TZm8rVUNnWUJtL0wraEp0L0hmb09pamJCK1hQbmsKOXVMdWRnWTg2V2dIS3RlZDdic1lYSlJwRERIcXl6NnR5TDI1Z0UvVHJjbi9NR0syVmhuTUhlYlQzcGpEemlJMAo3Q1M4K1BDUXhRRm1iU3ZhTW1FVTltWldVc2dLdEJLQXp5eE1vcm04d2szVytRU3pMekE2MW11TEFGZ01MUCtSCm8vT0Nrb0NraUs1ZVpLQlFRemwyTlFLQmdRQ0hpTWl2c3FVZ2RuSnoxWlIyc2VkZUhzOEg1MW9NZXloSXRtd1YKVTJGRlBYZEVLUEZvdysyVFc2anVkUWttV0RKVFh6WDhkZnhac0ZJYy94cXBGQnhhOWdtS01yemZvTTZ0MGFXQQpiZjlXZjRETUVTKzhMQ01lTXQyVHhzUW5qMWM5YjRRNElrWjZPWTkyYjh5d01sUHhWc3FiZzBsRS9Yd21HRTI4CmV6T1lJUUtCZ1FDV0JyMmlxdnNNeDRQRlpNemw2ZXh5MWhRZ1lBZFJjNUJTdGFGRXFBZ2dXMzdxM2w1clhuNW0KTzAvOUpXU1FVUGhpL21jQldrbzRoRVdrd1dBc3FhUjNienp5UEF0Ym9Wd20vamMxamJNM1ZBK3hNYmlWSFhUTgpzeHBoL2dIdHN5SHdjY3ZyeDk0ZDFZTjEvb0xPMTRLY3ZLM2Z4UnBWYW1sek41ZTMyb1pvMmc9PQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQ==`)
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUVOVENDQXgyZ0F3SUJBZ0lVYk1xcm9QZVQzdnVrbFNRQUdBSTBaK1NnT2hjd0RRWUpLb1pJaHZjTkFRRUwKQlFBd1R6RUxNQWtHQTFVRUJoTUNVbFV4RURBT0JnTlZCQWdUQjBWNFlXMXdiR1V4RHpBTkJnTlZCQWNUQmsxdgpjMk52ZHpFUU1BNEdBMVVFQ2hNSFJYaGhiWEJzWlRFTE1Ba0dBMVVFQ3hNQ1EwRXdIaGNOTWpNd05UQTRNVEV5Ck56QXdXaGNOTkRNd05UQXpNVEV5TnpBd1dqQlBNUXN3Q1FZRFZRUUdFd0pTVlRFUU1BNEdBMVVFQ0JNSFJYaGgKYlhCc1pURVBNQTBHQTFVRUJ4TUdUVzl6WTI5M01SQXdEZ1lEVlFRS0V3ZEZlR0Z0Y0d4bE1Rc3dDUVlEVlFRTApFd0pEUVRDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBT2dJaURkekEvdXNIMXpuCnA5T3JCVE5RdkhpRmN2NllmYjM3WHVHblprVHZiQzdEQ1JWQnkzUzc5THd2U01Pa2FQTjczUHZhM0wxck5CM04Kc24wQnBoOE5rRXIxb0Rjek4rRzBUbkZjZEZ6dHVMS3NEaGRkWkxlQmpuVnhMS2FCVkpYZjJhNmZoeUdnbThGWAp4TmV1SXdjcU96bHQzT2Y0SEg4RFozRVJIbDd1NFByeXJWSHREclhuam0xeFRmUGRYK0kwSjRLVC9Ja2ZzVG5xCjM1MTFwSFlHYzJIdDVOV2FVTlRjYkxxMWpsRG9lYWlEK0p1eXY5djRYUkdaOVNsT3h1eUhIbGF2RHNIeVZ0U2sKaEZGRHVCVk1xNDE1elJyUTBTSXFUUDZsdFpScXJuQmRaRGdKYWlqdkRQRVhMUkpzdmtSTmw0NFdHVkNyMm4vMwpGUkUvYkVFQ0F3RUFBYU9DQVFjd2dnRURNQTRHQTFVZER3RUIvd1FFQXdJRm9EQWRCZ05WSFNVRUZqQVVCZ2dyCkJnRUZCUWNEQVFZSUt3WUJCUVVIQXdJd0RBWURWUjBUQVFIL0JBSXdBREFkQmdOVkhRNEVGZ1FVeFZHc2ZOY0sKNmk0RW5QVDJONWJNY3pQM0Nvb3dnYVFHQTFVZEVRU0JuRENCbVlJcllXVm5iM0p2ZGkxaFpHMXBjM05wYjI0dQpaR1ZtWVhWc2RDNXpkbU11WTJ4MWMzUmxjaTVzYjJOaGJJSVJZV1ZuYjNKdmRpMWhaRzFwYzNOcGIyNkNKMkZsCloyOXliM1l0WVdSdGFYTnphVzl1TG1SbFptRjFiSFF1WTJ4MWMzUmxjaTVzYjJOaGJJSWRZV1ZuYjNKdmRpMWgKWkcxcGMzTnBiMjR1WkdWbVlYVnNkQzV6ZG1PQ0NXeHZZMkZzYUc5emRJY0Vmd0FBQVRBTkJna3Foa2lHOXcwQgpBUXNGQUFPQ0FRRUFJWFVQSDEzNTJBRFN4cUlGc2owSktUWGtRY3FTV1lETzEzZS9scER1ampPdXgvRWFCVmpsCkVNV2licnpDUGx3ZnFONUtEK0xDbzVLZGx1bW1TVFRnTjZXalBrWkNCeUxaVXVlazlmQnFzcG1SUDZ3QUo0SnYKTDVpalJoK2ZFdTlRZE55RUQrUWJOaUYrdjdpcWpzaFIwbHh0OVZXZmhETElMZUFtVGNyZmN0eURxKzVrYmh4egp0Y1JweFU0SThSaGdweWJFelY4bVpteUE2VkYyaUIzVVFIUnc3anV6cW5XRXFHa0R3OENleW1QZi9Yby9MSjZZCjVSLzJ2Q1FJb2VYRlJCUyt2cDExQit2QzhxMlpZb0UvL0drWXdVdnovTjZ4bHh5dlE1OG9aZUFXTWJiTDVzT0EKTHVDR2YyYS9vWWFnMlQrd1FNeStaenJMemoxRHdUVEdHQT09Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K
+  tls.key: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFb2dJQkFBS0NBUUVBNkFpSU4zTUQrNndmWE9lbjA2c0ZNMUM4ZUlWeS9waDl2ZnRlNGFkbVJPOXNMc01KCkZVSExkTHYwdkM5SXc2Um84M3ZjKzlyY3ZXczBIYzJ5ZlFHbUh3MlFTdldnTnpNMzRiUk9jVngwWE8yNHNxd08KRjExa3Q0R09kWEVzcG9GVWxkL1pycCtISWFDYndWZkUxNjRqQnlvN09XM2M1L2djZndObmNSRWVYdTdnK3ZLdApVZTBPdGVlT2JYRk44OTFmNGpRbmdwUDhpUit4T2VyZm5YV2tkZ1p6WWUzazFacFExTnhzdXJXT1VPaDVxSVA0Cm03Sy8yL2hkRVpuMUtVN0c3SWNlVnE4T3dmSlcxS1NFVVVPNEZVeXJqWG5OR3REUklpcE0vcVcxbEdxdWNGMWsKT0FscUtPOE04UmN0RW15K1JFMlhqaFlaVUt2YWYvY1ZFVDlzUVFJREFRQUJBb0lCQUFpd09SbUtidjIvaGpVZQpYNFJuaFB4VTY1bS90WHlmRFNaT0FWR0Z5U2lQcG9kaHVqZFhqVnpEcFBoZTlPU09oWGVJamMvSWREZUxpaG9MCmw4RmlqR3ZoUUNQdWFwOW1oWk1vQXovdmJGUUdlc0lGKzBrWXNDckc2U1N3cGpGZDZtTHFUT1pqQnRaVmd6K00KSDh6THNuZ1VOcitCdzZIVUFvMG0vWHFZWDREQ2N0djA3emFSQk9uSkdWZHNRN1crUGFzcXhXMThoYnZjeTM3MwppcW54S0c0bVJzb1dTKys5eVZMUGs2Q1ROSEN6SkJwc2QxOHBrZmVwN09UcSszTEk1Q09pdFZDZjVveDk1ZXV2CjU1WW0yd3h1TDZOMnpNMUdEdndiOVBLSVYvNVR0cVQzR3BvdWRVTGc4MGZ5UlRwMHZ2MEtodGIzTi8zajdNQ0MKanhYakdvRUNnWUVBN1Y4RWxEd2ZBUkJoTkFqRlFUb2tROFBUVTBkcGlBalZ1ZnRtRHJRTmxWL2lqNG96LzNTWApYbEh2a1YrN2VDZVFNRkVjMGgreVZGeWNrWjhId01RSDlnc3M3ZUV4L1dPQlVyVkdqeEh0ME9xcFkrMXZjNnVjCjRvdHpHK01hZ3dOQVBSaDJ0c0QyYW1sK0pBUVZUMnVXV3k2ZjdTaVNSMDU2SXRYTW9vakxHMGtDZ1lFQStqNUYKMEIwVlFPTkgyandIVUwyeFBqQkdlbjFQUWNML2pISW5MUG15NitZVVdrL0o5WEN3TnhkaDI0eFdhR0FOVFNSdgpoR2tnT1V1Z2xsMkM3NUd1YWNIMzBqbEdFc25ZQ216S1VVQlZKdUE3eWFUTEdxQmFGZ0VGOG5jQVpkS0FGNDdNCnBKRjE4N2RJTldjYm5WQ3NGMTcyRTJVWGI5VWpDN05xOVlNQ2tUa0NnWUI1ZnBEUmJwUlA3eHBSajh1bXZ5T2cKcTdLV2hZNjJXZzlLeWlwS2pFNEhqclJmMDlVWmc0dVdjMG16bHRSVmc2cUJrSUszNmhGVXJMSld0cGM1U3h6bwpDb0JNb1Y3ODJ0bHVnK3BCZ0dQQTh0c1FrbzdoSFkySFJ1ajc5Um0weFEwME9EbExBU2tlL2kvYUwxelk4YkJiCnExbWdBWXdkZzBWd1h3NEdndzJ5UVFLQmdGdjBHZzg1UUtBUlpFdkxGeDBTTjFrVXdERXVicnRKZmtJTGlGMjgKZTRTM2pPOEt0cm1iNlFTMWNONE9HWXBORVZZeGQxRCttRHExa1pMdlZiZldubko2TmlobnAxb3NGVmp2VlFDNgpWUS91QWNvODVlMG8wekdXdXFxNEU4dFdxSDcvbUM4NHpGRDhIbXFSTXRLQjNGclNLRFpFUlhKd3JXb1ZTYzVoCmo4WHhBb0dBWUx2Y09aYWdDSWwwbTQzcmI4MndsaFYvcFo1NlorU0VNMFFGTCthOTFheHhkZC91WmVaY1ErTVgKWDlvSytMbWNuekhrbkdGMmgzTS9DaE9kc3psMmkzNjg1S3JmR3pYbmpqZjVjd3B0K3FTaXkxZHNlZUY0SFpvYgppY1NaTmxheWtoKzBLK0ovOXRlL0FLTmxlbmFDaUw0SkFMY0lRdS8rMUFuNVU0QzRsSjg9Ci0tLS0tRU5EIFJTQSBQUklWQVRFIEtFWS0tLS0tCg== 
+`)
 
 	obj, _, err := decoder.Decode([]byte(input), nil, nil)
 	if err != nil {
@@ -632,7 +642,7 @@ metadata:
   labels:
     aegorov: webhook
 webhooks:
-  - name: aegorov-admission.default.svc
+  - name: aegorov-admission.default.svc.cluster.local
     admissionReviewVersions:
       - "v1beta1"
     sideEffects: "None"
@@ -645,12 +655,13 @@ webhooks:
         name: aegorov-admission
         namespace: default
         path: "/mutate/deployments"
-      caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURiakNDQWxhZ0F3SUJBZ0lVWHVMYW1NSms5bEhORjZEOGpudkZxZHMxNDhvd0RRWUpLb1pJaHZjTkFRRUwKQlFBd1R6RUxNQWtHQTFVRUJoTUNVbFV4RURBT0JnTlZCQWdUQjBWNFlXMXdiR1V4RHpBTkJnTlZCQWNUQmsxdgpjMk52ZHpFUU1BNEdBMVVFQ2hNSFJYaGhiWEJzWlRFTE1Ba0dBMVVFQ3hNQ1EwRXdIaGNOTWpNd05ERTNNVEF5Ck56QXdXaGNOTWpnd05ERTFNVEF5TnpBd1dqQlBNUXN3Q1FZRFZRUUdFd0pTVlRFUU1BNEdBMVVFQ0JNSFJYaGgKYlhCc1pURVBNQTBHQTFVRUJ4TUdUVzl6WTI5M01SQXdEZ1lEVlFRS0V3ZEZlR0Z0Y0d4bE1Rc3dDUVlEVlFRTApFd0pEUVRDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTWlGd2dlUGFrdC91dy9RCjl1N21pWmpndG9nWXl3U0xZcTN6c0I0RFQyK0twUEVpbTFVVFRCVHZzVWNnYTk5cUt5bTFxZXF3WWJSa3RIZHUKZGwzOHZTSEY0K0lOYmFpem1mY1hrSTFVV3I4dmFHaHVCc0lRd2lWdm9UODFialFSTk1MbWNma2dYM09BakJQSgo5U2UwSnpjbGY0dUVEd2R4R0xzdnJieElKWGk1UmxZVjZwekFiUUF0UE5pYWc0aExDaFpqY1FmRW1Cc1oyMjBkCncxMDZzeFVmRWplYjZoRWVvYnhjTHdzcTlGY00ySGJXMm8xYmtDY3ZuSm4ySEYzNXRlSmlDbHFBRWczaFpQOEYKOFdQKzNXREVHUVV2eFdWSFJtaEZqb0RNRFdDV1QzWkZZaVQvZU12c1l6c3duM2tpS2dON29jWnhXNXJvN3ZFQQpEeDI4K3ljQ0F3RUFBYU5DTUVBd0RnWURWUjBQQVFIL0JBUURBZ0VHTUE4R0ExVWRFd0VCL3dRRk1BTUJBZjh3CkhRWURWUjBPQkJZRUZQdDUzT0s3R0FMd3RidlVWNXorNXlvN2ZTU1lNQTBHQ1NxR1NJYjNEUUVCQ3dVQUE0SUIKQVFBWnhwcEs0eXhSVW1sckM5Q3BDR3M0VzR5LzNmTUtCVTRPT2Y3Q1R3VlIzQVc2bEdUbXYvTitCM01Wd3d1OQpESjJsYmhiTUhpSGdnMUdSd1IvN0t5T2FmeFQ0YkNPUG9NUjBZRU1Db0J6R3pRNHIvRUp1aStyRk03RGY1Mnh2ClJSOHprTnJIcXk5KzB1b1JackltRnNqYWNKOFBhUEdsZmV0eWFISEVGTDFNSXZkeGtEZ0xGYVBlcTZBaVJhT3AKd0VZenVhUnRsRDNUbVVSSXN1Yk9tN3Bpc1lITUN6NFdUeERzd2QzVU9OUGxpQlU2ZkVsZzZkNVFlMDVyWGc4YQpTMURnQThFKzRJZHkralZ0dk9YcmJTa3d0RDRYY2w3RWppQXk5TVY5TGlnelNCdmFReXlvb3FGR3FMYU43WDV3CkNtZVlxLzNHNUpVb2wzR3J5bENkekNDUQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0t
+      caBundle: "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURiakNDQWxhZ0F3SUJBZ0lVRzhyOWNHVi8xeUdweFdSbGZnU1RoVG9LMDBzd0RRWUpLb1pJaHZjTkFRRUwKQlFBd1R6RUxNQWtHQTFVRUJoTUNVbFV4RURBT0JnTlZCQWdUQjBWNFlXMXdiR1V4RHpBTkJnTlZCQWNUQmsxdgpjMk52ZHpFUU1BNEdBMVVFQ2hNSFJYaGhiWEJzWlRFTE1Ba0dBMVVFQ3hNQ1EwRXdIaGNOTWpNd05UQTRNVEV5Ck56QXdXaGNOTWpnd05UQTJNVEV5TnpBd1dqQlBNUXN3Q1FZRFZRUUdFd0pTVlRFUU1BNEdBMVVFQ0JNSFJYaGgKYlhCc1pURVBNQTBHQTFVRUJ4TUdUVzl6WTI5M01SQXdEZ1lEVlFRS0V3ZEZlR0Z0Y0d4bE1Rc3dDUVlEVlFRTApFd0pEUVRDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTEY4bkMzb21RK3Jaa3c4Ckw1elZNWnlnNmFvVCt0SUREeXZjWEcwbmlWa1pzUXJ1VUJJL1ZsN0ZZVWxFWmt6TkszZDgwbW5maW1ab2lhZjMKMlc3a3dzOW5ZVFhBVDJINzlSQjhtMDZEVEozTDdVV3hXQUw5K0J2dnJyTGF1MXB5TGlIVnFjK0NSOERWWHNuUQpPSzhwNWk5VlB6SmJzdmJFbWYzUG5JYUVYWHZmclBlUmpYdDNMejBQY1BEbGhneEF1Q09MamFKZlpBU01La290Ci9zWE14bzFtdDU3QzcxYXIxY01jNGhlNmNhZ2d4aEtpTVdZWmZDd1RPQWoyckthbTlDenRNK0JnYU5Ib0xZYlMKT3ZzbG90YUtSbm9tU1NnekczQ0xKeXljekE4NjZycUdxbjFmeXhPaFd0a1FSVjl4VjlYeDVOdlZrMktwSlhObgpvSlFBYmdrQ0F3RUFBYU5DTUVBd0RnWURWUjBQQVFIL0JBUURBZ0VHTUE4R0ExVWRFd0VCL3dRRk1BTUJBZjh3CkhRWURWUjBPQkJZRUZEdjBqNW94dmJzcnYxVlNUSC92UUZiMXdheE5NQTBHQ1NxR1NJYjNEUUVCQ3dVQUE0SUIKQVFCTTF1VUh3MHZOODk4QUp6UVcvOHR4TS93aWRoUGhqalRla08raEZ6d29UaGF5Z204TmxHZVNmNVRIbEozawpVVGw2MWFPU3Mrazg4VFFZdCtCY0hHMlhuSC85TkRRMmFBVWhmT3R5ejlySEpZRXVIbGNZSjI5VEcrbVl5WFpSCmNZVEt5U0QyUTdkMTRxWWRBa2lBa2RaVGZDWkJzMmYzSUUzOGtrTHpoRDkwOU9vem1xMnpYaEk0RExxSks0dU4KeFpIOGFuMmVvMGZVVThDWHJhVjB4dzViaXFQN2RSai9aTU1STnJhSWdIWmFQQ0FCR1dMbEpyZ25kZmNKWUx6dApEWm9YczRwZ2VlMmVab0d3QW1pWUtBc1RCK040ZTdFQllnaE9MYXpvaGI3bmhIMHF3VDY0TlJnMXZMKzFTNVZuCjd5SGN0WjgxYUtiWHJYcmtZZlNoVHh0TAotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg=="
     rules:
       - operations: [ "CREATE" ]
         apiGroups: [ "apps" ]
         apiVersions: [ "v1" ]
-        resources: [ "statefulsets" ]`)
+        resources: [ "statefulsets" ]
+`)
 
 	obj, _, err := decoder.Decode([]byte(input), nil, nil)
 	if err != nil {
@@ -659,6 +670,79 @@ webhooks:
 
 	w.MutatingWebhookConfiguration = obj.(*v14.MutatingWebhookConfiguration)
 	operatorLogger.Info("MutatingWebhookConfiguration has added")
+}
+
+func (w *WebhookResources) deleteAllResources(clientset *kubernetes.Clientset, ctx *context.Context, operatorLogger *logr.Logger) {
+
+	err := clientset.AppsV1().Deployments(w.Deployment.Namespace).Delete(*ctx, w.Deployment.Name, metav1.DeleteOptions{})
+	if err != nil {
+		operatorLogger.Error(err, fmt.Sprintf("Failed to delete Deployments: %v", w.Deployment.GetName()))
+	}
+	err = clientset.CoreV1().ConfigMaps(w.ConfigMap.Namespace).Delete(*ctx, w.ConfigMap.Name, metav1.DeleteOptions{})
+	if err != nil {
+		operatorLogger.Error(err, fmt.Sprintf("Failed to delete ConfigMaps: %v", w.Deployment.GetName()))
+	}
+	err = clientset.CoreV1().Services(w.Service.Namespace).Delete(*ctx, w.Service.Name, metav1.DeleteOptions{})
+	if err != nil {
+		operatorLogger.Error(err, fmt.Sprintf("Failed to delete Services: %v", w.Deployment.GetName()))
+	}
+	err = clientset.CoreV1().Secrets(w.Secret.Namespace).Delete(*ctx, w.Secret.Name, metav1.DeleteOptions{})
+	if err != nil {
+		operatorLogger.Error(err, fmt.Sprintf("Failed to delete deployment: %v", w.Deployment.GetName()))
+	}
+	err = clientset.CoreV1().ServiceAccounts(w.ServiceAccount.Namespace).Delete(*ctx, w.ServiceAccount.Name, metav1.DeleteOptions{})
+	if err != nil {
+		operatorLogger.Error(err, fmt.Sprintf("Failed to delete ServiceAccounts: %v", w.Deployment.GetName()))
+	}
+	err = clientset.RbacV1().ClusterRoles().Delete(*ctx, w.ClusterRole.Name, metav1.DeleteOptions{})
+	if err != nil {
+		operatorLogger.Error(err, fmt.Sprintf("Failed to delete ServiceAccounts: %v", w.Deployment.GetName()))
+	}
+	err = clientset.RbacV1().ClusterRoleBindings().Delete(*ctx, w.ClusterRoleBinding.Name, metav1.DeleteOptions{})
+	if err != nil {
+		operatorLogger.Error(err, fmt.Sprintf("Failed to delete ServiceAccounts: %v", w.Deployment.GetName()))
+	}
+	err = clientset.AdmissionregistrationV1().MutatingWebhookConfigurations().Delete(*ctx, w.MutatingWebhookConfiguration.Name, metav1.DeleteOptions{})
+	if err != nil {
+		operatorLogger.Error(err, fmt.Sprintf("Failed to delete MutatingWebhookConfigurations: %v", w.Deployment.GetName()))
+	}
+}
+
+func (r *WebhookMutatorReconciler) cleanupResourcesIfOperatorDeleted() error {
+	//resources, err := r.getAssociatedResources()
+	//if err != nil {
+	//	return err
+	//}
+	//
+	//// Check if any of the resources are missing
+	//for _, resource := range resources {
+	//	found, err := r.resourceExists(resource)
+	//	if err != nil {
+	//		return err
+	//	}
+	//
+	//	// If the resource is missing, perform cleanup logic
+	//	if !found {
+	//		if err := r.cleanupResource(resource); err != nil {
+	//			return err
+	//		}
+	//	}
+	//}
+	return nil
+}
+
+func (r *WebhookMutatorReconciler) getAssociatedResources() (WebhookResources, error) {
+	// Implement logic to retrieve associated resources
+	return WebhookResources{}, nil
+}
+
+func (r *WebhookMutatorReconciler) resourceExists(resource WebhookResources) (bool, error) {
+	// Implement logic to check if the resource exists
+	return true, nil
+}
+func (r *WebhookMutatorReconciler) cleanupResource(resource WebhookResources) error {
+	// Implement cleanup logic for the resource
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
